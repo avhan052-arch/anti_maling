@@ -4,8 +4,24 @@ import 'package:flutter/services.dart';
 import 'package:sensors_plus/sensors_plus.dart'; 
 import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter_volume_controller/flutter_volume_controller.dart'; 
+// Fitur Intruder Selfie
+import 'package:camera/camera.dart'; 
+import 'package:path_provider/path_provider.dart'; 
+import 'intruder_list_screen.dart';
+// Variabel global untuk kamera
+late List<CameraDescription> cameras;
 
-void main() {
+void main() async {
+  // Pastikan binding inisialisasi agar package kamera bisa diakses
+  WidgetsFlutterBinding.ensureInitialized(); 
+  
+  try {
+    // Ambil daftar kamera yang tersedia
+    cameras = await availableCameras();
+  } on CameraException catch (e) {
+    print('Error mengakses kamera: $e');
+  }
+
   runApp(const MaterialApp(
     debugShowCheckedModeBanner: false,
     home: AntiMalingApp(),
@@ -20,49 +36,107 @@ class AntiMalingApp extends StatefulWidget {
 }
 
 class _AntiMalingAppState extends State<AntiMalingApp> {
-  // --- VARIABEL UTAMA ---
+  // --- VARIABEL STATUS APLIKASI ---
   bool isActive = false; 
   bool isAlarmTriggered = false; 
-  bool isTestMode = true; // [BARU] Mode Pengujian
-
-  // Variabel untuk sensor
+  bool isTestMode = false; 
+  
+  // --- VARIABEL SENSOR & AUDIO ---
   List<double>? _initialPosition; 
   StreamSubscription<UserAccelerometerEvent>? _streamSubscription;
-  
-  // Variabel Audio
   final AudioPlayer _audioPlayer = AudioPlayer();
-  
-  // Kontroller input PIN
+  Timer? _loopTimer; 
+  bool _isRedScreen = false;
+  double _userPreviousVolume = 0.5; // Untuk menyimpan volume asli user
+
+  // --- VARIABEL PIN & CONTROLLER ---
   final TextEditingController _pinController = TextEditingController();
   final String correctPin = "1234"; 
 
-  // Timer untuk visual & getar berulang
-  Timer? _loopTimer; 
-  bool _isRedScreen = false;
-
-  // Variabel untuk menyimpan volume asli user sebelum alarm bunyi
-  double _userPreviousVolume = 0.5;
+  // --- VARIABEL KAMERA (Intruder Selfie) ---
+  late CameraController _cameraController;
+  bool _isCameraInitialized = false;
+  bool _isCapturing = false;
+  
 
   @override
   void initState() {
     super.initState();
     FlutterVolumeController.updateShowSystemUI(false);
+    _initializeCamera();
   }
 
-  @override
-  void dispose() {
-    _streamSubscription?.cancel();
-    _loopTimer?.cancel();
-    _audioPlayer.dispose();
-    _pinController.dispose();
-    super.dispose();
+  // --- FUNGSI KAMERA (INTRUDER SELFIE) ---
+  Future<void> _initializeCamera() async {
+    if (cameras.isEmpty) {
+      print("Tidak ada kamera ditemukan.");
+      return;
+    }
+    
+    try {
+      // Menggunakan kamera index 1 (biasanya kamera depan)
+      _cameraController = CameraController(
+        cameras[1], 
+        ResolutionPreset.low, // Resolusi rendah untuk kecepatan
+        enableAudio: false,
+      );
+
+      await _cameraController.initialize();
+      setState(() {
+        _isCameraInitialized = true;
+      });
+    } catch (e) {
+      setState(() {
+        _isCameraInitialized = false;
+      });
+      print("Gagal Inisialisasi Kamera: $e");
+    }
   }
 
-  // --- FUNGSI LOGIKA ---
+  Future<void> _captureIntruder() async {
+  // [PENTING] Cek apakah kamera sudah siap dan TIDAK sedang mengambil gambar
+  if (!_isCameraInitialized || _cameraController.value.isTakingPicture) {
+    print("Kamera sedang sibuk atau belum siap. Lewati capture.");
+    return;
+  }
+  
+  setState(() {
+    _isCapturing = true; // Set flag: Sedang mengambil foto
+  });
+
+  try {
+    final directory = await getTemporaryDirectory();
+    final fileName = 'Intruder_${DateTime.now().millisecondsSinceEpoch}.jpg';
+    final path = '${directory.path}/$fileName';
+    
+    final XFile image = await _cameraController.takePicture();
+    
+    await image.saveTo(path);
+
+    print('FOTO BUKTI TERSIMPAN KARENA PIN SALAH DI: $path');
+    
+  } catch (e) {
+    print("Error saat mengambil foto: $e");
+  } finally {
+    setState(() {
+      _isCapturing = false; // Reset flag
+    });
+  }
+}
+
+
+  // --- FUNGSI ALARM & SENSOR ---
 
   void _activateProtection() async {
+    // Cek izin kamera dan inisialisasi status
+    if (!_isCameraInitialized) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Kamera belum siap/gagal diakses. Alarm aktif tanpa foto.')),
+        );
+    }
+
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Letakkan HP dalam 5 detik...')),
+      const SnackBar(content: Text('Mode Jaga Diaktifkan. Letakkan HP dalam 5 detik...')),
     );
 
     await Future.delayed(const Duration(seconds: 5));
@@ -72,6 +146,7 @@ class _AntiMalingAppState extends State<AntiMalingApp> {
       _initialPosition = null; 
     });
 
+    // Mulai mendengarkan sensor
     _streamSubscription = userAccelerometerEventStream().listen((event) {
       if (!isActive || isAlarmTriggered) return;
 
@@ -80,6 +155,7 @@ class _AntiMalingAppState extends State<AntiMalingApp> {
         return;
       }
 
+      // Hitung pergerakan (Sensitivitas: 2.0)
       double deltaX = (event.x - _initialPosition![0]).abs();
       double deltaY = (event.y - _initialPosition![1]).abs();
       double deltaZ = (event.z - _initialPosition![2]).abs();
@@ -95,17 +171,17 @@ class _AntiMalingAppState extends State<AntiMalingApp> {
       isAlarmTriggered = true;
     });
 
-    // [LOGIKA VOLUME]
+    // [FITUR VOLUME LOCK]
     _userPreviousVolume = await FlutterVolumeController.getVolume() ?? 0.5;
-    double targetVolume = isTestMode ? 0.3 : 1.0; // Volume 30% saat Test Mode, 100% saat Normal
+    double targetVolume = isTestMode ? 0.3 : 1.0; 
     
     await FlutterVolumeController.setVolume(targetVolume);
 
-    // 2. Mainkan suara sirine
+    // Mainkan suara sirine
     await _audioPlayer.setReleaseMode(ReleaseMode.loop);
     await _audioPlayer.play(AssetSource('sirine.mp3'));
 
-    // 3. Loop: Getar, Kedip Layar, dan PAKSA VOLUME (Hanya jika BUKAN Test Mode)
+    // Loop: Getar, Kedip Layar, dan PAKSA VOLUME
     _loopTimer = Timer.periodic(const Duration(milliseconds: 500), (timer) {
       setState(() {
         _isRedScreen = !_isRedScreen;
@@ -121,9 +197,11 @@ class _AntiMalingAppState extends State<AntiMalingApp> {
 
   void _stopAlarm() async {
     if (_pinController.text == correctPin) {
+      // BAGIAN PIN BENAR (kode tetap sama)
       _streamSubscription?.cancel();
       _loopTimer?.cancel();
       _audioPlayer.stop();
+      // ... (reset state lainnya) ...
       
       await FlutterVolumeController.setVolume(_userPreviousVolume);
 
@@ -132,17 +210,46 @@ class _AntiMalingAppState extends State<AntiMalingApp> {
         isAlarmTriggered = false;
         _pinController.clear();
         _isRedScreen = false;
+        // Hapus: _isPhotoTaken = false; (karena flag ini sudah tidak dipakai)
       });
 
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Alarm Dimatikan. Aman!')),
       );
     } else {
+      // BAGIAN PIN SALAH [IMPLEMENTASI BARU]
+      
+      // 1. Ambil Foto Penyusup
+      if (_isCameraInitialized) {
+        await Future.delayed(const Duration(milliseconds: 200));
+        _captureIntruder();
+      }
+      
+      // 2. Beri Notifikasi PIN Salah
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(backgroundColor: Colors.red, content: Text('PIN SALAH!')),
+        const SnackBar(backgroundColor: Colors.red, content: Text('PIN SALAH! Foto Penyusup Diambil!')),
       );
+      
+      // 3. (Opsional) Beri Getaran Panjang agar penyusup kaget
+      HapticFeedback.heavyImpact();
     }
+}
+
+  // --- DISPOSE: Bersihkan semua controller saat aplikasi ditutup ---
+  @override
+  void dispose() {
+    _streamSubscription?.cancel();
+    _loopTimer?.cancel();
+    _audioPlayer.dispose();
+    _pinController.dispose();
+    
+    if (_isCameraInitialized) {
+      _cameraController.dispose();
+    }
+    
+    super.dispose();
   }
+
 
   // --- TAMPILAN UI ---
   @override
@@ -186,9 +293,31 @@ class _AntiMalingAppState extends State<AntiMalingApp> {
                   style: TextStyle(
                       color: isAlarmTriggered ? Colors.black : Colors.grey),
                 ),
-                const SizedBox(height: 50),
+                const SizedBox(height: 20),
 
-                // [BARU] Tombol Toggle Mode Uji
+// [BARU] Tombol Lihat Bukti Foto (Hanya muncul saat alarm tidak aktif)
+if (!isActive && !isAlarmTriggered)
+  TextButton.icon(
+    onPressed: () {
+      Navigator.push(
+        context,
+        MaterialPageRoute(builder: (context) => const IntruderListScreen()),
+    ).then((_) {
+      // [BARU] Kode ini dijalankan saat user menekan tombol back dari IntruderListScreen
+      // (Jika ada state yang perlu di-update di layar utama, bisa diletakkan di sini,
+      // tapi untuk kasus ini, ini memastikan layar IntruderListScreen yang akan di-refresh)
+      // Sebenarnya, logic refresh harusnya di IntruderListScreen, tapi ini untuk jaga-jaga.
+    });
+  },
+    icon: const Icon(Icons.photo_library, color: Colors.grey),
+    label: const Text(
+      'Lihat Bukti Foto',
+      style: TextStyle(color: Colors.grey),
+    ),
+  ),
+                const SizedBox(height: 50),
+              
+                // Tombol Toggle Mode Uji
                 if (!isActive && !isAlarmTriggered)
                   TextButton(
                     onPressed: () {
