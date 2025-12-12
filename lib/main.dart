@@ -3,7 +3,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart'; 
 import 'package:sensors_plus/sensors_plus.dart'; 
 import 'package:audioplayers/audioplayers.dart';
-// [BARU] Import package volume
 import 'package:flutter_volume_controller/flutter_volume_controller.dart'; 
 
 void main() {
@@ -24,24 +23,29 @@ class _AntiMalingAppState extends State<AntiMalingApp> {
   // --- VARIABEL UTAMA ---
   bool isActive = false; 
   bool isAlarmTriggered = false; 
-  
+  bool isTestMode = true; // [BARU] Mode Pengujian
+
+  // Variabel untuk sensor
   List<double>? _initialPosition; 
   StreamSubscription<UserAccelerometerEvent>? _streamSubscription;
   
+  // Variabel Audio
   final AudioPlayer _audioPlayer = AudioPlayer();
+  
+  // Kontroller input PIN
   final TextEditingController _pinController = TextEditingController();
   final String correctPin = "1234"; 
 
+  // Timer untuk visual & getar berulang
   Timer? _loopTimer; 
   bool _isRedScreen = false;
 
-  // [BARU] Variabel untuk menyimpan volume asli user sebelum alarm bunyi
+  // Variabel untuk menyimpan volume asli user sebelum alarm bunyi
   double _userPreviousVolume = 0.5;
 
   @override
   void initState() {
     super.initState();
-    // [BARU] Inisialisasi pengaturan volume (agar tidak menampilkan UI volume bawaan HP yang mengganggu)
     FlutterVolumeController.updateShowSystemUI(false);
   }
 
@@ -91,26 +95,27 @@ class _AntiMalingAppState extends State<AntiMalingApp> {
       isAlarmTriggered = true;
     });
 
-    // [BARU] 1. Simpan volume user saat ini
+    // [LOGIKA VOLUME]
     _userPreviousVolume = await FlutterVolumeController.getVolume() ?? 0.5;
+    double targetVolume = isTestMode ? 0.3 : 1.0; // Volume 30% saat Test Mode, 100% saat Normal
+    
+    await FlutterVolumeController.setVolume(targetVolume);
 
-    // [BARU] 2. Paksa Volume ke MAX (1.0 = 100%)
-    await FlutterVolumeController.setVolume(1.0);
-
-    // 3. Mainkan suara sirine
+    // 2. Mainkan suara sirine
     await _audioPlayer.setReleaseMode(ReleaseMode.loop);
     await _audioPlayer.play(AssetSource('sirine.mp3'));
 
-    // 4. Loop: Getar, Kedip Layar, dan PAKSA VOLUME
+    // 3. Loop: Getar, Kedip Layar, dan PAKSA VOLUME (Hanya jika BUKAN Test Mode)
     _loopTimer = Timer.periodic(const Duration(milliseconds: 500), (timer) {
       setState(() {
         _isRedScreen = !_isRedScreen;
       });
       HapticFeedback.heavyImpact(); 
       
-      // [BARU] Lock Volume: Setel ulang ke 100% setiap 0.5 detik
-      // Ini akan melawan jika user mencoba mengecilkan volume
-      FlutterVolumeController.setVolume(1.0);
+      // Volume Lock hanya aktif jika BUKAN Test Mode
+      if (!isTestMode) {
+        FlutterVolumeController.setVolume(targetVolume);
+      }
     });
   }
 
@@ -120,7 +125,6 @@ class _AntiMalingAppState extends State<AntiMalingApp> {
       _loopTimer?.cancel();
       _audioPlayer.stop();
       
-      // [BARU] Kembalikan volume ke level semula (biar user tidak kaget saat buka sosmed lain)
       await FlutterVolumeController.setVolume(_userPreviousVolume);
 
       setState(() {
@@ -140,7 +144,7 @@ class _AntiMalingAppState extends State<AntiMalingApp> {
     }
   }
 
-  // --- TAMPILAN UI (Sama seperti sebelumnya) ---
+  // --- TAMPILAN UI ---
   @override
   Widget build(BuildContext context) {
     Color backgroundColor = isAlarmTriggered
@@ -176,13 +180,31 @@ class _AntiMalingAppState extends State<AntiMalingApp> {
                 const SizedBox(height: 10),
                 Text(
                   isAlarmTriggered
-                      ? "Volume Terkunci di 100%!" // Update teks info
+                      ? (isTestMode ? "Volume (30%) TIDAK TERKUNCI" : "Volume (100%) TERKUNCI!")
                       : "Tekan tombol untuk mengaktifkan sensor.",
                   textAlign: TextAlign.center,
                   style: TextStyle(
                       color: isAlarmTriggered ? Colors.black : Colors.grey),
                 ),
                 const SizedBox(height: 50),
+
+                // [BARU] Tombol Toggle Mode Uji
+                if (!isActive && !isAlarmTriggered)
+                  TextButton(
+                    onPressed: () {
+                      setState(() {
+                        isTestMode = !isTestMode;
+                      });
+                    },
+                    child: Text(
+                      isTestMode ? "Mode: PENGEMBANGAN (Suara Kecil)" : "Mode: PRODUKSI (Suara Penuh)",
+                      style: TextStyle(
+                        color: isTestMode ? Colors.yellow : Colors.grey,
+                        decoration: TextDecoration.underline,
+                      ),
+                    ),
+                  ),
+                const SizedBox(height: 20),
 
                 if (!isActive && !isAlarmTriggered)
                   ElevatedButton(
