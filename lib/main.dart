@@ -1,8 +1,10 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart'; // Tambahan untuk HapticFeedback (Getar Bawaan)
+import 'package:flutter/services.dart'; 
 import 'package:sensors_plus/sensors_plus.dart'; 
-import 'package:audioplayers/audioplayers.dart'; 
+import 'package:audioplayers/audioplayers.dart';
+// [BARU] Import package volume
+import 'package:flutter_volume_controller/flutter_volume_controller.dart'; 
 
 void main() {
   runApp(const MaterialApp(
@@ -23,20 +25,25 @@ class _AntiMalingAppState extends State<AntiMalingApp> {
   bool isActive = false; 
   bool isAlarmTriggered = false; 
   
-  // Variabel untuk sensor
   List<double>? _initialPosition; 
   StreamSubscription<UserAccelerometerEvent>? _streamSubscription;
   
-  // Variabel Audio
   final AudioPlayer _audioPlayer = AudioPlayer();
-  
-  // Kontroller input PIN
   final TextEditingController _pinController = TextEditingController();
   final String correctPin = "1234"; 
 
-  // Timer untuk visual & getar berulang
-  Timer? _loopTimer; // Ganti nama jadi loopTimer karena dipakai untuk getar juga
+  Timer? _loopTimer; 
   bool _isRedScreen = false;
+
+  // [BARU] Variabel untuk menyimpan volume asli user sebelum alarm bunyi
+  double _userPreviousVolume = 0.5;
+
+  @override
+  void initState() {
+    super.initState();
+    // [BARU] Inisialisasi pengaturan volume (agar tidak menampilkan UI volume bawaan HP yang mengganggu)
+    FlutterVolumeController.updateShowSystemUI(false);
+  }
 
   @override
   void dispose() {
@@ -61,7 +68,6 @@ class _AntiMalingAppState extends State<AntiMalingApp> {
       _initialPosition = null; 
     });
 
-    // Mulai mendengarkan sensor
     _streamSubscription = userAccelerometerEventStream().listen((event) {
       if (!isActive || isAlarmTriggered) return;
 
@@ -74,7 +80,6 @@ class _AntiMalingAppState extends State<AntiMalingApp> {
       double deltaY = (event.y - _initialPosition![1]).abs();
       double deltaZ = (event.z - _initialPosition![2]).abs();
 
-      // SENSITIVITAS
       if (deltaX > 2.0 || deltaY > 2.0 || deltaZ > 2.0) {
         _triggerAlarm();
       }
@@ -86,29 +91,38 @@ class _AntiMalingAppState extends State<AntiMalingApp> {
       isAlarmTriggered = true;
     });
 
-    // 1. Mainkan suara sirine
+    // [BARU] 1. Simpan volume user saat ini
+    _userPreviousVolume = await FlutterVolumeController.getVolume() ?? 0.5;
+
+    // [BARU] 2. Paksa Volume ke MAX (1.0 = 100%)
+    await FlutterVolumeController.setVolume(1.0);
+
+    // 3. Mainkan suara sirine
     await _audioPlayer.setReleaseMode(ReleaseMode.loop);
     await _audioPlayer.play(AssetSource('sirine.mp3'));
 
-    // 2. Efek Getar & Layar Kedip (Looping)
-    // Kita gunakan Timer ini untuk menggantikan fungsi paket vibration yang error
+    // 4. Loop: Getar, Kedip Layar, dan PAKSA VOLUME
     _loopTimer = Timer.periodic(const Duration(milliseconds: 500), (timer) {
       setState(() {
         _isRedScreen = !_isRedScreen;
       });
-      // Getarkan HP setiap 0.5 detik (Menggunakan fitur bawaan Flutter)
       HapticFeedback.heavyImpact(); 
+      
+      // [BARU] Lock Volume: Setel ulang ke 100% setiap 0.5 detik
+      // Ini akan melawan jika user mencoba mengecilkan volume
+      FlutterVolumeController.setVolume(1.0);
     });
   }
 
-  void _stopAlarm() {
+  void _stopAlarm() async {
     if (_pinController.text == correctPin) {
-      // Matikan semua
       _streamSubscription?.cancel();
       _loopTimer?.cancel();
       _audioPlayer.stop();
-      // Tidak perlu Vibration.cancel() karena HapticFeedback berhenti otomatis
       
+      // [BARU] Kembalikan volume ke level semula (biar user tidak kaget saat buka sosmed lain)
+      await FlutterVolumeController.setVolume(_userPreviousVolume);
+
       setState(() {
         isActive = false;
         isAlarmTriggered = false;
@@ -126,7 +140,7 @@ class _AntiMalingAppState extends State<AntiMalingApp> {
     }
   }
 
-  // --- TAMPILAN UI ---
+  // --- TAMPILAN UI (Sama seperti sebelumnya) ---
   @override
   Widget build(BuildContext context) {
     Color backgroundColor = isAlarmTriggered
@@ -136,7 +150,7 @@ class _AntiMalingAppState extends State<AntiMalingApp> {
     return Scaffold(
       backgroundColor: backgroundColor,
       body: Center(
-        child: SingleChildScrollView( // Tambahkan Scroll agar tidak overflow saat keyboard muncul
+        child: SingleChildScrollView( 
           child: Padding(
             padding: const EdgeInsets.all(24.0),
             child: Column(
@@ -162,7 +176,7 @@ class _AntiMalingAppState extends State<AntiMalingApp> {
                 const SizedBox(height: 10),
                 Text(
                   isAlarmTriggered
-                      ? "Masukkan PIN untuk mematikan!"
+                      ? "Volume Terkunci di 100%!" // Update teks info
                       : "Tekan tombol untuk mengaktifkan sensor.",
                   textAlign: TextAlign.center,
                   style: TextStyle(
