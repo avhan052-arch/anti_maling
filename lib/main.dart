@@ -1,25 +1,27 @@
 import 'dart:async';
+import 'dart:io';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart'; 
-import 'package:sensors_plus/sensors_plus.dart'; 
+import 'package:flutter/services.dart';
+import 'package:sensors_plus/sensors_plus.dart';
 import 'package:audioplayers/audioplayers.dart';
-import 'package:flutter_volume_controller/flutter_volume_controller.dart'; 
-// Fitur Intruder Selfie
-import 'package:camera/camera.dart'; 
-import 'package:path_provider/path_provider.dart'; 
+import 'package:flutter_volume_controller/flutter_volume_controller.dart';
+import 'package:camera/camera.dart';
+import 'package:path_provider/path_provider.dart';
+
+// Import library tambahan
+import 'package:http/http.dart' as http;
+import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart';
+
 import 'intruder_list_screen.dart';
-// Variabel global untuk kamera
+
 late List<CameraDescription> cameras;
 
 void main() async {
-  // Pastikan binding inisialisasi agar package kamera bisa diakses
-  WidgetsFlutterBinding.ensureInitialized(); 
-  
+  WidgetsFlutterBinding.ensureInitialized();
   try {
-    // Ambil daftar kamera yang tersedia
     cameras = await availableCameras();
   } on CameraException catch (e) {
-    print('Error mengakses kamera: $e');
+    debugPrint('Error mengakses kamera: $e');
   }
 
   runApp(const MaterialApp(
@@ -36,117 +38,165 @@ class AntiMalingApp extends StatefulWidget {
 }
 
 class _AntiMalingAppState extends State<AntiMalingApp> {
-  // --- VARIABEL STATUS APLIKASI ---
-  bool isActive = false; 
-  bool isAlarmTriggered = false; 
-  bool isTestMode = false; 
-  
-  // --- VARIABEL SENSOR & AUDIO ---
-  List<double>? _initialPosition; 
+  // --- KONFIGURASI TELEGRAM ---
+  // ISI DENGAN DATA BOT KAMU
+  final String telegramBotToken = "8442607801:AAEhAeiAj5N3yw1ddnwtZjRpkGBMZ6Xaloo";
+  final String telegramChatId = "7779707348";
+
+  // --- VARIABEL STATUS ---
+  bool isActive = false;
+  bool isAlarmTriggered = false;
+  bool isTestMode = false;
+
+  // --- SENSOR & AUDIO ---
+  List<double>? _initialPosition;
   StreamSubscription<UserAccelerometerEvent>? _streamSubscription;
   final AudioPlayer _audioPlayer = AudioPlayer();
-  Timer? _loopTimer; 
+  Timer? _loopTimer;
   bool _isRedScreen = false;
-  double _userPreviousVolume = 0.5; // Untuk menyimpan volume asli user
+  double _userPreviousVolume = 0.5;
 
-  // --- VARIABEL PIN & CONTROLLER ---
+  // --- PIN ---
   final TextEditingController _pinController = TextEditingController();
-  final String correctPin = "1234"; 
+  final String correctPin = "1234";
 
-  // --- VARIABEL KAMERA (Intruder Selfie) ---
+  // --- KAMERA & AI ---
   late CameraController _cameraController;
+  late FaceDetector _faceDetector;
   bool _isCameraInitialized = false;
-  bool _isCapturing = false;
-  
+  bool _isCapturing = false; // Sekarang variabel ini digunakan
 
   @override
   void initState() {
     super.initState();
     FlutterVolumeController.updateShowSystemUI(false);
     _initializeCamera();
+    
+    // Inisialisasi AI
+    final options = FaceDetectorOptions(
+      performanceMode: FaceDetectorMode.accurate,
+      enableLandmarks: true,
+      enableClassification: true,
+    );
+    _faceDetector = FaceDetector(options: options);
   }
 
-  // --- FUNGSI KAMERA (INTRUDER SELFIE) ---
   Future<void> _initializeCamera() async {
-    if (cameras.isEmpty) {
-      print("Tidak ada kamera ditemukan.");
-      return;
-    }
-    
+    if (cameras.isEmpty) return;
     try {
-      // Menggunakan kamera index 1 (biasanya kamera depan)
       _cameraController = CameraController(
-        cameras[1], 
-        ResolutionPreset.low, // Resolusi rendah untuk kecepatan
+        cameras.length > 1 ? cameras[1] : cameras[0],
+        ResolutionPreset.medium,
         enableAudio: false,
       );
-
       await _cameraController.initialize();
-      setState(() {
-        _isCameraInitialized = true;
-      });
+      if (mounted) {
+        setState(() => _isCameraInitialized = true);
+      }
     } catch (e) {
-      setState(() {
-        _isCameraInitialized = false;
-      });
-      print("Gagal Inisialisasi Kamera: $e");
+      debugPrint("Gagal Inisialisasi Kamera: $e");
     }
   }
 
-  Future<void> _captureIntruder() async {
-  // [PENTING] Cek apakah kamera sudah siap dan TIDAK sedang mengambil gambar
-  if (!_isCameraInitialized || _cameraController.value.isTakingPicture) {
-    print("Kamera sedang sibuk atau belum siap. Lewati capture.");
-    return;
-  }
-  
-  setState(() {
-    _isCapturing = true; // Set flag: Sedang mengambil foto
-  });
+  // --- LOGIKA UTAMA: AI & TELEGRAM ---
+  Future<void> _processIntruder() async {
+    // Cek apakah kamera siap dan tidak sedang sibuk
+    if (!_isCameraInitialized || _isCapturing) return;
+    if (_cameraController.value.isTakingPicture) return;
 
-  try {
-    final directory = await getTemporaryDirectory();
-    final fileName = 'Intruder_${DateTime.now().millisecondsSinceEpoch}.jpg';
-    final path = '${directory.path}/$fileName';
-    
-    final XFile image = await _cameraController.takePicture();
-    
-    await image.saveTo(path);
+    setState(() => _isCapturing = true);
 
-    print('FOTO BUKTI TERSIMPAN KARENA PIN SALAH DI: $path');
-    
-  } catch (e) {
-    print("Error saat mengambil foto: $e");
-  } finally {
-    setState(() {
-      _isCapturing = false; // Reset flag
-    });
-  }
-}
+    try {
+      final directory = await getApplicationDocumentsDirectory();
+      final fileName = 'Intruder_${DateTime.now().millisecondsSinceEpoch}.jpg';
+      final path = '${directory.path}/$fileName';
+      
+      // Ambil Foto
+      XFile image = await _cameraController.takePicture();
+      await image.saveTo(path);
 
+      // Analisa AI
+      final inputImage = InputImage.fromFilePath(path);
+      final List<Face> faces = await _faceDetector.processImage(inputImage);
+      
+      bool faceDetected = faces.isNotEmpty;
+      String statusMsg = faceDetected 
+          ? "WAJAH TERDETEKSI! (${faces.length} wajah)" 
+          : "Gerakan terdeteksi (Wajah tidak jelas).";
 
-  // --- FUNGSI ALARM & SENSOR ---
+      debugPrint(statusMsg);
 
-  void _activateProtection() async {
-    // Cek izin kamera dan inisialisasi status
-    if (!_isCameraInitialized) {
+      // Kirim ke Telegram
+      await _sendToTelegram(File(path), statusMsg);
+
+      // Tampilkan Notifikasi (Cek mounted dulu agar tidak error)
+      if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Kamera belum siap/gagal diakses. Alarm aktif tanpa foto.')),
+          SnackBar(
+            backgroundColor: faceDetected ? Colors.redAccent : Colors.orange,
+            content: Text("Bukti direkam. $statusMsg Dikirim ke Telegram!"),
+            duration: const Duration(seconds: 2),
+          ),
         );
+      }
+
+    } catch (e) {
+      debugPrint("Error AI/Camera: $e");
+    } finally {
+      if (mounted) {
+        setState(() => _isCapturing = false);
+      }
+    }
+  }
+
+  Future<void> _sendToTelegram(File photoFile, String caption) async {
+    if (telegramBotToken.contains("GANTI") || telegramChatId.contains("GANTI")) {
+      debugPrint("Token Telegram belum diisi.");
+      return;
     }
 
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Mode Jaga Diaktifkan. Letakkan HP dalam 5 detik...')),
-    );
+    try {
+      var uri = Uri.parse("https://api.telegram.org/bot$telegramBotToken/sendPhoto");
+      var request = http.MultipartRequest("POST", uri);
+      
+      request.fields['chat_id'] = telegramChatId;
+      request.fields['caption'] = "🚨 PERINGATAN MALING! 🚨\n\nStatus: $caption\nWaktu: ${DateTime.now()}\nLokasi: Perangkat Anda.";
+      
+      var pic = await http.MultipartFile.fromPath("photo", photoFile.path);
+      request.files.add(pic);
 
+      var response = await request.send();
+      if (response.statusCode == 200) {
+        debugPrint("Berhasil kirim ke Telegram");
+      } else {
+        debugPrint("Gagal kirim Telegram: ${response.statusCode}");
+      }
+    } catch (e) {
+      debugPrint("Error Telegram: $e");
+    }
+  }
+
+  // --- ALARM ---
+  void _activateProtection() async {
+    if (!_isCameraInitialized) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Kamera gagal. Alarm audio saja.')));
+      }
+    }
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Mode Jaga Diaktifkan. Letakkan HP dalam 5 detik...')));
+    }
+    
     await Future.delayed(const Duration(seconds: 5));
 
-    setState(() {
-      isActive = true;
-      _initialPosition = null; 
-    });
+    if (mounted) {
+      setState(() {
+        isActive = true;
+        _initialPosition = null;
+      });
+    }
 
-    // Mulai mendengarkan sensor
     _streamSubscription = userAccelerometerEventStream().listen((event) {
       if (!isActive || isAlarmTriggered) return;
 
@@ -155,7 +205,6 @@ class _AntiMalingAppState extends State<AntiMalingApp> {
         return;
       }
 
-      // Hitung pergerakan (Sensitivitas: 2.0)
       double deltaX = (event.x - _initialPosition![0]).abs();
       double deltaY = (event.y - _initialPosition![1]).abs();
       double deltaZ = (event.z - _initialPosition![2]).abs();
@@ -167,91 +216,71 @@ class _AntiMalingAppState extends State<AntiMalingApp> {
   }
 
   void _triggerAlarm() async {
-    setState(() {
-      isAlarmTriggered = true;
-    });
-
-    // [FITUR VOLUME LOCK]
+    if (!mounted) return;
+    setState(() => isAlarmTriggered = true);
+    
     _userPreviousVolume = await FlutterVolumeController.getVolume() ?? 0.5;
-    double targetVolume = isTestMode ? 0.3 : 1.0; 
+    double targetVolume = isTestMode ? 0.3 : 1.0;
     
     await FlutterVolumeController.setVolume(targetVolume);
-
-    // Mainkan suara sirine
     await _audioPlayer.setReleaseMode(ReleaseMode.loop);
     await _audioPlayer.play(AssetSource('sirine.mp3'));
 
-    // Loop: Getar, Kedip Layar, dan PAKSA VOLUME
     _loopTimer = Timer.periodic(const Duration(milliseconds: 500), (timer) {
-      setState(() {
-        _isRedScreen = !_isRedScreen;
-      });
-      HapticFeedback.heavyImpact(); 
-      
-      // Volume Lock hanya aktif jika BUKAN Test Mode
-      if (!isTestMode) {
-        FlutterVolumeController.setVolume(targetVolume);
+      if (mounted) {
+        setState(() => _isRedScreen = !_isRedScreen);
+        HapticFeedback.heavyImpact();
+        if (!isTestMode) FlutterVolumeController.setVolume(targetVolume);
       }
     });
   }
 
   void _stopAlarm() async {
     if (_pinController.text == correctPin) {
-      // BAGIAN PIN BENAR (kode tetap sama)
+      // PIN BENAR
       _streamSubscription?.cancel();
       _loopTimer?.cancel();
       _audioPlayer.stop();
-      // ... (reset state lainnya) ...
-      
       await FlutterVolumeController.setVolume(_userPreviousVolume);
-
-      setState(() {
-        isActive = false;
-        isAlarmTriggered = false;
-        _pinController.clear();
-        _isRedScreen = false;
-        // Hapus: _isPhotoTaken = false; (karena flag ini sudah tidak dipakai)
-      });
-
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Alarm Dimatikan. Aman!')),
-      );
-    } else {
-      // BAGIAN PIN SALAH [IMPLEMENTASI BARU]
       
-      // 1. Ambil Foto Penyusup
+      if (mounted) {
+        setState(() {
+          isActive = false;
+          isAlarmTriggered = false;
+          _pinController.clear();
+          _isRedScreen = false;
+        });
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Alarm Dimatikan. Aman!')));
+      }
+    } else {
+      // PIN SALAH
       if (_isCameraInitialized) {
-        await Future.delayed(const Duration(milliseconds: 200));
-        _captureIntruder();
+        _processIntruder(); // Panggil fungsi AI
       }
       
-      // 2. Beri Notifikasi PIN Salah
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(backgroundColor: Colors.red, content: Text('PIN SALAH! Foto Penyusup Diambil!')),
-      );
-      
-      // 3. (Opsional) Beri Getaran Panjang agar penyusup kaget
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            backgroundColor: Colors.red, 
+            content: Text('PIN SALAH! Menganalisa wajah & mengirim bukti...')
+          ),
+        );
+      }
       HapticFeedback.heavyImpact();
     }
-}
+  }
 
-  // --- DISPOSE: Bersihkan semua controller saat aplikasi ditutup ---
   @override
   void dispose() {
     _streamSubscription?.cancel();
     _loopTimer?.cancel();
     _audioPlayer.dispose();
     _pinController.dispose();
-    
-    if (_isCameraInitialized) {
-      _cameraController.dispose();
-    }
-    
+    _faceDetector.close();
+    if (_isCameraInitialized) _cameraController.dispose();
     super.dispose();
   }
 
-
-  // --- TAMPILAN UI ---
   @override
   Widget build(BuildContext context) {
     Color backgroundColor = isAlarmTriggered
@@ -261,7 +290,7 @@ class _AntiMalingAppState extends State<AntiMalingApp> {
     return Scaffold(
       backgroundColor: backgroundColor,
       body: Center(
-        child: SingleChildScrollView( 
+        child: SingleChildScrollView(
           child: Padding(
             padding: const EdgeInsets.all(24.0),
             child: Column(
@@ -273,7 +302,6 @@ class _AntiMalingAppState extends State<AntiMalingApp> {
                   color: isAlarmTriggered ? Colors.black : Colors.cyanAccent,
                 ),
                 const SizedBox(height: 20),
-                
                 Text(
                   isAlarmTriggered
                       ? "MALING TERDETEKSI!"
@@ -290,41 +318,28 @@ class _AntiMalingAppState extends State<AntiMalingApp> {
                       ? (isTestMode ? "Volume (30%) TIDAK TERKUNCI" : "Volume (100%) TERKUNCI!")
                       : "Tekan tombol untuk mengaktifkan sensor.",
                   textAlign: TextAlign.center,
-                  style: TextStyle(
-                      color: isAlarmTriggered ? Colors.black : Colors.grey),
+                  style: TextStyle(color: isAlarmTriggered ? Colors.black : Colors.grey),
                 ),
                 const SizedBox(height: 20),
 
-// [BARU] Tombol Lihat Bukti Foto (Hanya muncul saat alarm tidak aktif)
-if (!isActive && !isAlarmTriggered)
-  TextButton.icon(
-    onPressed: () {
-      Navigator.push(
-        context,
-        MaterialPageRoute(builder: (context) => const IntruderListScreen()),
-    ).then((_) {
-      // [BARU] Kode ini dijalankan saat user menekan tombol back dari IntruderListScreen
-      // (Jika ada state yang perlu di-update di layar utama, bisa diletakkan di sini,
-      // tapi untuk kasus ini, ini memastikan layar IntruderListScreen yang akan di-refresh)
-      // Sebenarnya, logic refresh harusnya di IntruderListScreen, tapi ini untuk jaga-jaga.
-    });
-  },
-    icon: const Icon(Icons.photo_library, color: Colors.grey),
-    label: const Text(
-      'Lihat Bukti Foto',
-      style: TextStyle(color: Colors.grey),
-    ),
-  ),
+                // Tombol Lihat Bukti
+                if (!isActive && !isAlarmTriggered)
+                  TextButton.icon(
+                    onPressed: () {
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(builder: (context) => const IntruderListScreen()),
+                      );
+                    },
+                    icon: const Icon(Icons.photo_library, color: Colors.grey),
+                    label: const Text('Lihat Bukti Foto', style: TextStyle(color: Colors.grey)),
+                  ),
                 const SizedBox(height: 50),
-              
-                // Tombol Toggle Mode Uji
+
+                // Tombol Mode Uji
                 if (!isActive && !isAlarmTriggered)
                   TextButton(
-                    onPressed: () {
-                      setState(() {
-                        isTestMode = !isTestMode;
-                      });
-                    },
+                    onPressed: () => setState(() => isTestMode = !isTestMode),
                     child: Text(
                       isTestMode ? "Mode: PENGEMBANGAN (Suara Kecil)" : "Mode: PRODUKSI (Suara Penuh)",
                       style: TextStyle(
@@ -373,8 +388,8 @@ if (!isActive && !isAlarmTriggered)
                 else
                   ElevatedButton(
                     onPressed: () {
-                       _streamSubscription?.cancel();
-                       setState(() => isActive = false);
+                      _streamSubscription?.cancel();
+                      setState(() => isActive = false);
                     },
                     style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
                     child: const Text("BATALKAN", style: TextStyle(color: Colors.white)),
