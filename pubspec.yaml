@@ -24,6 +24,7 @@ dependencies:
   google_mlkit_face_detection: ^0.13.1
   http: ^1.6.0
   geolocator: ^14.0.2
+  battery_plus: ^7.0.0
 
 dev_dependencies:
   flutter_test:

@@ -11,6 +11,7 @@ import 'package:http/http.dart' as http;
 import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart';
 // Import baru untuk GPS
 import 'package:geolocator/geolocator.dart';
+import 'package:battery_plus/battery_plus.dart';
 
 import 'intruder_list_screen.dart';
 
@@ -41,6 +42,12 @@ class _AntiMalingAppState extends State<AntiMalingApp> {
   // --- KONFIGURASI TELEGRAM ---
   final String telegramBotToken = "8442607801:AAEhAeiAj5N3yw1ddnwtZjRpkGBMZ6Xaloo";
   final String telegramChatId = "7779707348";
+
+
+//   Untuk Baterai
+  final Battery _battery = Battery();
+  StreamSubscription<BatteryState>? _batterySubscription;
+  bool _isChargerMode = false;
 
 
   // --- STATUS ---
@@ -208,7 +215,23 @@ class _AntiMalingAppState extends State<AntiMalingApp> {
     // Minta izin lokasi di awal agar siap saat maling datang
     await Geolocator.requestPermission();
 
-    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Mode Jaga AKTIF dalam 5 detik...')));
+    // Cek apakah HP sedang dicas saat tombol ditekan?
+    if (_isChargerMode) {
+      final batteryState = await _battery.batteryState;
+      if (batteryState != BatteryState.charging && batteryState != BatteryState.full) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Gagal: HP harus sedang dicas untuk mode ini!'))
+          );
+        }
+        return; // Batalkan aktivasi jika tidak dicas
+      }
+    }
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Mode Jaga AKTIF dalam 5 detik...')));
+    }
+
     await Future.delayed(const Duration(seconds: 5));
 
     if (mounted) {
@@ -234,6 +257,18 @@ class _AntiMalingAppState extends State<AntiMalingApp> {
         _triggerAlarm();
       }
     });
+    if (_isChargerMode) {
+      _batterySubscription = _battery.onBatteryStateChanged.listen((BatteryState state) {
+        if (!isActive || isAlarmTriggered) return;
+        
+        // Jika status berubah jadi "Discharging" (Dicabut), bunyikan alarm
+        if (state == BatteryState.discharging) {
+          debugPrint("Kabel Charger Dicabut! ALARM!");
+          _triggerAlarm();
+        }
+      });
+    }
+
   }
 
   void _triggerAlarm() async {
@@ -259,6 +294,7 @@ class _AntiMalingAppState extends State<AntiMalingApp> {
   void _stopAlarm() async {
     if (_pinController.text == correctPin) {
       _streamSubscription?.cancel();
+      _batterySubscription?.cancel();
       _loopTimer?.cancel();
       _audioPlayer.stop();
       await FlutterVolumeController.setVolume(_userPreviousVolume);
@@ -317,7 +353,7 @@ class _AntiMalingAppState extends State<AntiMalingApp> {
                 style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold, color: isAlarmTriggered ? Colors.black : Colors.white)),
                 const SizedBox(height: 10),
 
-                // --- UPDATE UI TOMBOL LIHAT BUKTI ---
+                // --- TOMBOL LIHAT BUKTI ---
                 if (!isActive && !isAlarmTriggered)
                   TextButton.icon(
                     onPressed: () {
@@ -327,6 +363,28 @@ class _AntiMalingAppState extends State<AntiMalingApp> {
                     label: const Text('Lihat Bukti Foto', style: TextStyle(color: Colors.grey)),
                   ),
 
+                  const SizedBox(height: 30),
+
+                  if (!isActive && !isAlarmTriggered)
+                  Container(
+                    margin: const EdgeInsets.only(bottom: 20),
+                    padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+                    decoration: BoxDecoration(
+                      color: Colors.grey.shade800,
+                      borderRadius: BorderRadius.circular(15),
+                    ),
+                    child: SwitchListTile(
+                      title: const Text("Mode Anti-Cabut Charger", style: TextStyle(color: Colors.white)),
+                      subtitle: const Text("Alarm bunyi jika kabel dilepas", style: TextStyle(color: Colors.grey, fontSize: 12)),
+                      value: _isChargerMode,
+                      activeColor: Colors.cyanAccent,
+                      onChanged: (bool value) {
+                        setState(() {
+                          _isChargerMode = value;
+                        });
+                      },
+                    ),
+                  ),
                   const SizedBox(height: 30),
                   if (!isActive && !isAlarmTriggered)
                     TextButton(
